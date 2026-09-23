@@ -1,0 +1,77 @@
+{
+  "model": {
+    "model_class": "MCR_Model_FSR",
+    "args": {
+      "d_model": 40,
+      "num_classes": 1,
+      "fc_inner": 64,
+      "dropout": 0.1,
+      "cls_type": "linear",
+      "clip_grad": false,
+      "bias_infusion": {
+        "method": "MCR_FSR_Reg",
+        "task": "reg",
+        "reg_by": "dist_pred_cjsd",
+        "num_samples": 1024,
+        "l": 0.1,
+        "l_gradnorm": 0,
+        "shuffle": true,
+        "shuffle_type": "rand",
+        "noise": false,
+        "starting_epoch": 0,
+        "ending_epoch": 50,
+        "use": true,
+        "plot": false,
+        "use_fsr": true,
+        "fsr_lambda_dom": 0.05,
+        "fsr_lambda_syn": 0.03,
+        "fsr_margin": 0.05,
+        "fsr_tau_dom": 10.0,
+        "fsr_use_gate": false,
+        "fsr_gate_kappa": 5.0,
+        "fsr_gate_tau": 0.1,
+        "fsr_starting_epoch": 3,
+        "fsr_ending_epoch": 12
+      },
+      "multi_loss": {
+        "multi_supervised_w": {
+          "combined": 1,
+          "c": 1,
+          "g": 1
+        }
+      }
+    },
+    "load_ongoing": false,
+    "save_dir": "MCR_FSR_{}.pth.tar",
+    "encoders": [
+      {
+        "model": "FactorCL_Uni",
+        "args": {
+          "n_features": 20,
+          "hidden_size": 40,
+          "modality": "c",
+          "num_classes": 1,
+          "freeze_encoder": false
+        },
+        "pretrainedEncoder": {
+          "use": true,
+          "dir": "unimodal_video_{}.pth.tar"
+        }
+      },
+      {
+        "model": "FactorCL_Uni",
+        "args": {
+          "n_features": 768,
+          "hidden_size": 40,
+          "modality": "g",
+          "num_classes": 1,
+          "freeze_encoder": false
+        },
+        "pretrainedEncoder": {
+          "use": true,
+          "dir": "unimodal_text_{}.pth.tar"
+        }
+      }
+    ]
+  }
+}

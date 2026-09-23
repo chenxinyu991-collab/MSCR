@@ -1,0 +1,37 @@
+.idea/
+*.iml
+**/__pycache__/
+__pycache__/
+*.pyc
+
+# Training logs and local run output
+*.log
+nohup.out
+wandb/
+outputs/
+runs/
+exp/
+checkpoints/
+
+# Downloaded caches and pretrained weights
+my_torch_cache/
+pretrained_models/
+*.pt
+*.pth
+*.pth.tar
+*.ckpt
+*.bin
+
+# Notebook and local tool caches
+.ipynb_checkpoints/
+.ruff_cache/
+
+# Local environments and system files
+.venv/
+venv/
+env/
+.env
+.DS_Store
+*.swp
+./datasets/Factor_CL_Datasets/MultiBench/
+pyproject.toml

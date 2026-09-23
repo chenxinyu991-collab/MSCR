@@ -1,0 +1,44 @@
+{
+  "model": {
+    "model_class": "MCR_Model",
+    "args": {
+      "d_model": 512, "num_classes": 51, "fc_inner": 64, "dropout": 0.1,
+      "shared_pred": true,
+      "cls_type": "tf",
+      "clip_grad": false,
+      "shufflegradmulti": true,
+      "bias_infusion": {
+        "method": "MCR",
+        "reg_by": "dist_pred_cjsd",
+        "shuffle_type": "rand",
+        "num_samples": 6,
+        "l": 0.1,
+        "l_gradnorm": 0,
+        "shuffle": true,
+        "noise": false,
+        "starting_epoch": 0,
+        "ending_epoch": 100,
+        "use": false,
+        "plot": false
+      },
+      "multi_loss": {
+        "multi_supervised_w": {
+             "combined": 1, "c": 1, "g": 1
+          }
+      }
+    },
+    "load_ongoing": false,
+    "save_dir": "MCR_{}.pth.tar",
+    "encoders": [
+      {
+        "model": "Audio_ResNet",
+        "args": { "d_model": 512, "num_classes": 51, "fc_inner": 64, "dropout": 0.1, "freeze_encoder": false},
+        "pretrainedEncoder": {"use": false, "dir": "unimodal_audio_fold{}.pth.tar"}
+      },
+      {
+        "model": "Video_ResNet",
+        "args": {"d_model": 512, "num_classes": 51, "fc_inner": 64, "dropout": 0.1, "freeze_encoder": false},
+        "pretrainedEncoder": {"use": false, "dir": "unimodal_video_fold{}.pth.tar"}}
+    ]
+  }
+}

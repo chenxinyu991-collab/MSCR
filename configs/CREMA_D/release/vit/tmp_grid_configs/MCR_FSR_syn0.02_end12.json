@@ -1,0 +1,102 @@
+{
+  "training_params": {
+    "seed": 109,
+    "batch_size": 32,
+    "tdqm_disable": false
+  },
+  "dataset": {
+    "norm_wav_path": "./datasets/CREMAD/wav_norm_16000_fold{}.pkl",
+    "norm_face_path": "./datasets/CREMAD/norm_face_path_fold{}.pkl",
+    "return_data": {
+      "video": false,
+      "spectrogram": false,
+      "audio": true,
+      "face": true
+    },
+    "sampling_rate": 16000,
+    "data_split": {
+      "fold": 0
+    }
+  },
+  "early_stopping": {
+    "save_every_valstep": 10,
+    "n_steps_stop": 35
+  },
+  "model": {
+    "model_class": "MCR_Model_FSR",
+    "save_base_dir": "/inspire/ssd/project/sais-scientific-models-evaluation/public/global_user/8331-huao/llj_temp/cxy/CremaD_vit",
+    "args": {
+      "d_model": 512,
+      "num_classes": 6,
+      "fc_inner": 64,
+      "dropout": 0.1,
+      "cls_type": "linear",
+      "clip_grad": false,
+      "batchnorm_features": false,
+      "shufflegradmulti": true,
+      "bias_infusion": {
+        "method": "MCR_FSR",
+        "reg_by": "dist_pred_cjsd",
+        "num_samples": 6,
+        "l": 0.1,
+        "l_gradnorm": 0,
+        "shuffle": true,
+        "noise": false,
+        "shuffle_type": "rand",
+        "starting_epoch": 0,
+        "ending_epoch": 50,
+        "use": true,
+        "plot": false,
+        "use_fsr": true,
+        "fsr_lambda_dom": 0.02,
+        "fsr_lambda_syn": 0.02,
+        "fsr_margin": 0.05,
+        "fsr_tau_dom": 10.0,
+        "fsr_use_gate": true,
+        "fsr_gate_kappa": 5.0,
+        "fsr_gate_tau": 1.2,
+        "fsr_starting_epoch": 3,
+        "fsr_ending_epoch": 12
+      },
+      "multi_loss": {
+        "multi_supervised_w": {
+          "combined": 1,
+          "c": 1,
+          "g": 1
+        }
+      }
+    },
+    "load_ongoing": false,
+    "save_dir": "MCR_FSR_{}.pth.tar",
+    "encoders": [
+      {
+        "model": "Audio_Wav2Vec",
+        "args": {
+          "d_model": 512,
+          "num_classes": 6,
+          "fc_inner": 64,
+          "dropout": 0.1,
+          "freeze_encoder": false
+        },
+        "pretrainedEncoder": {
+          "use": false,
+          "dir": "unimodal_audio_fold{}.pth.tar"
+        }
+      },
+      {
+        "model": "Video_FacesConformer",
+        "args": {
+          "d_model": 512,
+          "num_classes": 6,
+          "fc_inner": 64,
+          "dropout": 0.1,
+          "freeze_encoder": false
+        },
+        "pretrainedEncoder": {
+          "use": false,
+          "dir": "unimodal_images_fold{}.pth.tar"
+        }
+      }
+    ]
+  }
+}

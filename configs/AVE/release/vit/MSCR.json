@@ -1,0 +1,89 @@
+{
+  "dataset": {
+    "return_data": {
+      "video": true,
+      "spectrogram": false,
+      "audio": true
+    },
+    "num_frame": 10
+  },
+  "model": {
+    "model_class": "MCR_Model_FSR",
+    "args": {
+      "d_model": 768,
+      "num_classes": 28,
+      "fc_inner": 64,
+      "dropout": 0.1,
+      "shared_pred": true,
+      "cls_type": "linear",
+      "clip_grad": false,
+      "shufflegradmulti": true,
+      "bias_infusion": {
+        "method": "MCR_FSR",
+        "reg_by": "dist_pred_cjsd",
+        "num_samples": 6,
+        "l": 0.1,
+        "l_gradnorm": 0,
+        "shuffle": true,
+        "noise": false,
+        "shuffle_type": "rand",
+        "starting_epoch": 0,
+        "ending_epoch": 50,
+        "use": true,
+        "plot": false,
+
+        "use_fsr": true,
+        "fsr_lambda_dom": 0,
+        "fsr_lambda_syn": 0.03,
+        "fsr_margin": 0.05,
+        "fsr_tau_dom": 10.0,
+
+        "fsr_use_gate": true,
+        "fsr_gate_kappa": 5.0,
+        "fsr_gate_tau": 1.2,
+
+        "fsr_starting_epoch": 3,
+        "fsr_ending_epoch": 12
+      },
+      "multi_loss": {
+        "multi_supervised_w": {
+          "combined": 1,
+          "c": 1,
+          "g": 1
+        }
+      }
+    },
+    "load_ongoing": false,
+    "save_dir": "MCR_FSR_{}.pth.tar",
+    "encoders": [
+      {
+        "model": "Audio_HubertAudioset",
+        "args": {
+          "d_model": 768,
+          "num_classes": 28,
+          "fc_inner": 64,
+          "dropout": 0.1,
+          "freeze_encoder": false
+        },
+        "pretrainedEncoder": {
+          "use": true,
+          "dir": "unimodal_audio_AudioSets_fold{}_lr0.0001_wd0.0001.pth.tar"
+        }
+      },
+      {
+        "model": "Video_ViViT",
+        "args": {
+          "d_model": 768,
+          "num_classes": 28,
+          "pretrained": true,
+          "num_frame": 10,
+          "freeze_encoder": false
+        },
+        "pretrainedEncoder": {
+          "use": true,
+          "dir": "images_linearcls_previvit_10frames_fold{}_lr0.0001_wd0.0001.pth.tar"
+        }
+      }
+    ]
+  }
+}
