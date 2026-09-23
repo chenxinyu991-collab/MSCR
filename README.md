@@ -6,13 +6,9 @@ Official implementation of the paper
 
 ### **_MSCR: Jointly Balancing Modality Utilization and Discovering Synergistic Information_**
 
-#### Manuscript under review at NeurIPS 2026
 
 </div>
 
-<!-- Add the public paper URL, author list, affiliations, and repository license when available. -->
-
-> **Documentation draft:** The method and results below follow the manuscript. Repository layout, installation instructions, and launch commands must be checked against the MSCR codebase before release. Items marked `TODO` require repository-specific information.
 
 ---
 
@@ -150,12 +146,6 @@ Table 2 of the manuscript reports the following conditional recovery rates:
 | CMU-MOSEI | Transformer | V-T | 7.12% | **12.50%** |
 | CMU-MOSEI | Transformer | V-A-T | 6.71% | **13.69%** |
 
-These results provide behavioral evidence of improved cross-modal collaboration. The additive reference and conditional recovery analysis are practical proxies, rather than exact estimates of PID synergy.
-
-<div align="center">
-  <img src="figs/Results_ErrorMatrices_MSCR.png" alt="MCR and MSCR error comparison on CREMA-D with ResNet and Conformer backbones" width="800">
-</div>
-
 ### Transformer-Based Fusion
 
 MSCR also improves conditional recovery when the fusion module is replaced with a Transformer (Table 3). Overall test accuracy is reported separately in Appendix D, Table 6.
@@ -166,103 +156,6 @@ MSCR also improves conditional recovery when the fusion module is replaced with 
 | CREMA-D | Conformer | 11.82% | **25.66%** | 82.12% | **82.35%** |
 | AVE | ResNet | 11.11% | **15.13%** | 74.05% | **74.12%** |
 | UCF | ResNet | 16.41% | **22.63%** | 53.11% | **53.45%** |
-
-### Ablation Study
-
-Both objectives contribute to performance. The following representative results are from Table 4; values are accuracy (%).
-
-| Anti-dominance | Synergy | CREMA-D (Conformer) | AVE (Conformer) | MOSI (V-T) |
-|:---:|:---:|---:|---:|---:|
-| Off | Off | 85.1 ± 0.5 | 87.4 ± 0.2 | 75.3 ± 0.7 |
-| On | Off | 85.9 ± 0.6 | 88.8 ± 0.4 | 75.9 ± 0.7 |
-| Off | On | 86.2 ± 0.5 | 88.3 ± 0.2 | 76.1 ± 0.9 |
-| On | On | **86.4 ± 0.9** | **89.3 ± 0.3** | **76.8 ± 0.8** |
-
-## Repository Structure
-
-**TODO: Verify this proposed layout against the MSCR repository.** It follows the organization of the supplied MCR README and does not assert that these code files already exist.
-
-```text
-MSCR/
-├── agents/             # Training and evaluation pipeline
-│   └── helpers/        # Evaluator, loader, trainer, and validator
-├── configs/            # Dataset/backbone configurations and MSCR settings
-├── datasets/           # Dataset loaders
-├── experiments/        # Experiment resources, if retained from MCR
-├── figs/               # Method and result figures
-├── models/             # Encoders, fusion models, and regularizers
-├── posthoc/            # Post-hoc evaluation and conditional recovery analysis
-├── utils/              # Utility functions
-├── run.sh              # Experiment launcher, if retained from MCR
-├── train.py            # Training entry point, if retained from MCR
-├── requirements.txt    # Verified dependencies
-└── README.md
-```
-
-## Installation
-
-**TODO:** Add the repository URL, tested Python/PyTorch/CUDA versions, and dependency installation command from the actual environment. The manuscript reports experiments on a single **NVIDIA RTX 4090 with 24 GB memory**; this is the reported experimental setup, not a verified minimum requirement.
-
-## Path Setup
-
-**TODO: Confirm whether MSCR retains MCR's path-resolution mechanism before using this section.** The upstream README uses these variables:
-
-| Variable | Purpose | Upstream default |
-|---|---|---|
-| `PROJECT_DEFAULT_DIR` | Repository root | Set explicitly |
-| `PROJECT_CHECKPOINTS_DIR` | Checkpoint directory | `PROJECT_DEFAULT_DIR/checkpoints` |
-| `PROJECT_DATA_DIR` | Dataset directory | `PROJECT_DEFAULT_DIR/data` |
-
-If the same mechanism is retained, configure a local `.project_paths.sh`:
-
-```bash
-#!/usr/bin/env bash
-export PROJECT_DEFAULT_DIR="/path/to/MSCR"
-export PROJECT_CHECKPOINTS_DIR="/path/to/checkpoints_root"
-export PROJECT_DATA_DIR="/path/to/data_root"
-```
-
-In the supplied MCR README, `run.sh` loads this file automatically, and configuration prefixes `project_data_directory/` and `project_checkpoints_directory/` are resolved to the corresponding paths. Verify that behavior in MSCR before relying on it.
-
-## Training and Evaluation
-
-### Experimental Protocol
-
-Following Appendix A of the manuscript:
-
-- Use the same data splits, modality-specific encoders, fusion backbones, optimizer settings, learning-rate schedules, batch sizes, and training epochs as MCR.
-- Select the best checkpoint using the validation set, then evaluate on the test set.
-- Report mean and standard deviation across **three folds** for CREMA-D and UCF, and **three independent random seeds** for AVE, MOSI, and MOSEI.
-- Enable MSCR after the initial training stage and only within the configured activation interval.
-
-### MSCR Hyperparameters
-
-The settings below reproduce Table 5 of the manuscript. Symbols describe the method; they are not confirmed command-line argument names.
-
-| Dataset | Backbone | Modalities | λ_dom | λ_syn | m | τ_dom | κ | τ |
-|---|---|---|---:|---:|---:|---:|---:|---:|
-| CREMA-D | ResNet | V-A | 0.02 | 0.03 | 0.05 | 10.0 | 5.0 | 1.5 |
-| CREMA-D | Conformer | V-A | 0.05 | 0.03 | 0.05 | 10.0 | 5.0 | 1.2 |
-| AVE | ResNet | V-A | 0.02 | 0.03 | 0.05 | 10.0 | 5.0 | 1.5 |
-| AVE | Conformer | V-A | 0.05 | 0.03 | 0.05 | 10.0 | 5.0 | 1.2 |
-| UCF | ResNet | V-A | 0.02 | 0.03 | 0.05 | 10.0 | 5.0 | 1.5 |
-| CMU-MOSI | Transformer | V-T | 0.05 | 0.03 | 0.04 | 10.0 | 5.0 | 1.2 |
-| CMU-MOSI | Transformer | V-A-T | 0.05 | 0.03 | 0.04 | 10.0 | 5.0 | 1.2 |
-| CMU-MOSEI | Transformer | V-T | 0.05 | 0.03 | 0.04 | 10.0 | 5.0 | 1.2 |
-| CMU-MOSEI | Transformer | V-A-T | 0.05 | 0.03 | 0.04 | 10.0 | 5.0 | 1.2 |
-
-### Launching Experiments
-
-**TODO:** Replace the template below with a tested command. It assumes the upstream `train.py` interface is retained; configuration paths and MSCR options must be confirmed from the code.
-
-```text
-python train.py \
-  --config <PATH_TO_MSCR_EXPERIMENT_CONFIG> \
-  --default_config <PATH_TO_DATASET_DEFAULT_CONFIG> \
-  --fold <FOLD_INDEX>
-```
-
-Before release, provide the exact training and checkpoint-evaluation commands, the mapping from MSCR hyperparameters to configuration keys, the activation interval, and the fold/seed settings. Also document the command used to compute conditional recovery, including the failure condition used for trimodal inputs.
 
 ## Datasets
 
@@ -278,8 +171,6 @@ Data preparation follows the MCR evaluation protocol described in the manuscript
 
 CREMA-D uses actor-disjoint splits. MOSI and MOSEI use the aligned data versions provided through MultiBench. See Appendix B of the manuscript for preprocessing and backbone details.
 
-**TODO:** Add the exact download/preprocessing steps and expected on-disk layout used by the repository's dataset loaders.
-
 ## Acknowledgments
 
 This work builds on **Multimodal Competition Regularizer (MCR)**:
@@ -294,26 +185,3 @@ We thank the MCR authors for their research and open-source implementation. MSCR
 
 For questions and feedback, please open an issue in this repository.
 
-<!-- TODO: Add the corresponding author's public email address when appropriate. -->
-
-## Citation
-
-**MSCR:** Citation metadata will be added with the public manuscript. The current manuscript is under review at NeurIPS 2026.
-
-<!-- TODO: Add a BibTeX entry with the confirmed authors and public manuscript URL. Do not label the paper as accepted while it is under review. -->
-
-If your work uses the underlying MCR method or implementation, please also cite:
-
-```bibtex
-@inproceedings{kontras2025MCR,
-  title={Balancing Multimodal Training Through Game-Theoretic Regularization},
-  author={Konstantinos Kontras and Thomas Strypsteen and Christos Chatzichristos and Paul Pu Liang and Matthew B. Blaschko and Maarten De Vos},
-  booktitle={The Thirty-ninth Annual Conference on Neural Information Processing Systems},
-  year={2025},
-  url={https://openreview.net/forum?id=auiURbhoYx}
-}
-```
-
-## License
-
-**TODO:** Specify the repository's license and retain the applicable notices for reused code. The MIT badge in the supplied MCR README does not by itself establish the license of this MSCR repository.
