@@ -1,6 +1,6 @@
 {
   "model": {
-    "model_class": "MCR_3D_Model",
+    "model_class": "MCR_FSR_3D_Model",
     "args": {
       "d_model": 40,
       "num_classes": 1,
@@ -9,7 +9,7 @@
       "cls_type": "linear",
       "clip_grad": false,
       "bias_infusion": {
-        "method": "MCR3D_Reg",
+        "method": "MCR_FSR_Reg",
         "reg_by": "dist_pred_cjsd",
         "num_samples": 1024,
         "l": 0.1,

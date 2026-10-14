@@ -3438,6 +3438,200 @@ class MCR_3D_Model(nn.Module):
 
         return output
 
+class MCR_FSR_3D_Model(MCR_3D_Model):
+    """Three-modal regression: task -> all; MCR -> encoders; FSR -> fusion.
+
+    c/g/f mean enc_0/enc_1/enc_2, NOT fixed audio/visual/text assignments.
+    FSR is the legacy code name for MSCR. The task loss is built by the trainer.
+    """
+
+    _FUSION_ROOTS = frozenset({
+        "fc_0_lin", "fc_1_lin", "fc_2_lin", "cls_bias", "common_fc",
+        "bn_0", "bn_1", "bn_2",
+    })
+
+    def __init__(self, args, encs):
+        if len(encs) != 3:
+            raise ValueError("MCR_FSR_3D_Model requires exactly three encoders.")
+        cfg = args.get("bias_infusion", {})
+        if cfg.get("lib", 0) != 0:
+            raise ValueError("Set lib=0: the optional CEB head is outside this MSCR objective.")
+        if args.get("norm_decision", False):
+            raise ValueError("Regression requires norm_decision=False (raw predictions).")
+        super().__init__(args, encs)
+
+    @staticmethod
+    def _detach_tree(value):
+        if torch.is_tensor(value):
+            return value.detach()
+        if isinstance(value, dict):
+            return {k: MCR_FSR_3D_Model._detach_tree(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [MCR_FSR_3D_Model._detach_tree(v) for v in value]
+        if isinstance(value, tuple):
+            return tuple(MCR_FSR_3D_Model._detach_tree(v) for v in value)
+        return value
+
+    @staticmethod
+    def _index_tree(value, index, batch_size):
+        """Shuffle tensors consistently, including nonaggr_features for TF fusion."""
+        if torch.is_tensor(value):
+            if value.ndim == 0 or value.shape[0] != batch_size:
+                raise ValueError("Every tensor in an encoder output must have batch as dimension 0.")
+            return value.index_select(0, index.to(value.device))
+        if isinstance(value, dict):
+            return {k: MCR_FSR_3D_Model._index_tree(v, index, batch_size) for k, v in value.items()}
+        if isinstance(value, list):
+            return [MCR_FSR_3D_Model._index_tree(v, index, batch_size) for v in value]
+        if isinstance(value, tuple):
+            return tuple(MCR_FSR_3D_Model._index_tree(v, index, batch_size) for v in value)
+        return value
+
+    def _get_features(self, x, **kwargs):
+        # Task supervision must reach both encoder features and unimodal heads.
+        call_kwargs = dict(kwargs)
+        call_kwargs.pop("detach_pred", None)
+        outputs = [enc(x, detach_pred=False, **call_kwargs)
+                   for enc in (self.enc_0, self.enc_1, self.enc_2)]
+        predictions = [out["preds"]["combined"] for out in outputs]
+        return (*outputs, *predictions)
+
+    def _fusion_forward(self, features, predictions, detached_modalities=()):
+        features, predictions = list(features), list(predictions)
+        for i in detached_modalities:
+            # Detach BEFORE fusion. Avoid the parent's detach_c/detach_a mismatch.
+            features[i] = self._detach_tree(features[i])
+            predictions[i] = predictions[i].detach()
+        result = super()._forward_main(
+            *features, *predictions, notwandb=True,
+        )[0]
+        if self.cls_type == "highlynonlinear":
+            # The supplied parent omits this final head in this branch.
+            result = self.common_fc(result)
+        return result
+
+    def _regularizer_fusion(self, features, predictions, *, freeze_weights,
+                            detached_modalities=()):
+        """Use constant weights for MCR, live weights for FSR; isolate buffers."""
+        state = {
+            name: (param.detach() if freeze_weights else param)
+            for name, param in self.named_parameters()
+            if name.split(".", 1)[0] in self._FUSION_ROOTS
+        }
+        if not state:
+            raise RuntimeError("No recognized fusion parameters; check the base model.")
+        state.update({
+            name: buf.detach().clone()
+            for name, buf in self.named_buffers()
+            if name.split(".", 1)[0] in self._FUSION_ROOTS
+        })
+        return functional_call(
+            self, state, ((features, predictions, detached_modalities),),
+            {"_mscr_fusion_only": True}, strict=False,
+        )
+
+    def shuffle_ids(self, label):
+        """Same MCR sampling convention as the parent, without its B=1 loop."""
+        cfg = self.args.bias_infusion
+        batch_size = label.shape[0]
+        count = cfg.get("num_samples", 1)
+        if batch_size < 1 or not isinstance(count, int) or count < 1:
+            raise ValueError("MCR requires a nonempty batch and integer num_samples >= 1.")
+        samples = []
+        for _ in range(count):
+            indices = [torch.randperm(batch_size) if cfg.get("shuffle", True)
+                       else torch.arange(batch_size) for _ in range(4)]
+            if cfg.get("reg_by") == "dist_pred_3d_agree":
+                indices[1] = indices[0]
+                indices[2] = indices[0]
+            samples.append({
+                **{f"shuffle_idx_{i}": index for i, index in enumerate(indices)},
+                "data": torch.ones(batch_size, dtype=torch.bool),
+            })
+        return samples
+
+    def _add_mcr_outputs(self, output, features, predictions, label):
+        # Reuse the original batch replication and MCR perturbation convention.
+        values = self.shuffle_data(
+            *features, *predictions, output["preds"]["combined"], label,
+        )
+        (sc, sg, sf, spc, spg, spf, nc, ng, nf, npc, npg, npf,
+         _task_ref, nlabel, sc3, sg3, sf3, spc3, spg3, spf3) = values
+        normal, shuffled = (nc, ng, nf), (sc, sg, sf)
+        normal_pred = tuple(p.detach() for p in (npc, npg, npf))
+        shuffled_pred = tuple(p.detach() for p in (spc, spg, spf))
+        perturbations = {"sc": (0,), "sg": (1,), "sf": (2,),
+                         "scf": (0, 2), "sgf": (1, 2), "scg": (0, 1)}
+        masks = {"": (), "_detc": (0,), "_detg": (1,), "_detf": (2,),
+                 "_detgf": (1, 2), "_detcf": (0, 2), "_detcg": (0, 1)}
+        for name, changed in perturbations.items():
+            z = tuple(shuffled[i] if i in changed else normal[i] for i in range(3))
+            p = tuple(shuffled_pred[i] if i in changed else normal_pred[i] for i in range(3))
+            for suffix, detached in masks.items():
+                output["preds"][name + suffix] = self._regularizer_fusion(
+                    z, p, freeze_weights=True, detached_modalities=detached,
+                )
+        # Preserve the parent's jointly permuted pair outputs as well.
+        agreed, agreed_pred = (sc3, sg3, sf3), (spc3, spg3, spf3)
+        for name, changed in (("sgf_detgf_agree", (1, 2)),
+                              ("scf_detcf_agree", (0, 2)),
+                              ("scg_detcg_agree", (0, 1))):
+            z = tuple(agreed[i] if i in changed else normal[i] for i in range(3))
+            p = tuple(agreed_pred[i].detach() if i in changed else normal_pred[i] for i in range(3))
+            output["preds"][name] = self._regularizer_fusion(
+                z, p, freeze_weights=True, detached_modalities=changed,
+            )
+        # Do not reuse/detach the task prediction: the MCR reference must retain
+        # encoder gradients while excluding fusion gradients, just like its peers.
+        output["preds"]["ncombined"] = self._regularizer_fusion(
+            normal, normal_pred, freeze_weights=True,
+        )
+        output["preds"]["n_label"] = nlabel.detach()
+
+    def _add_fsr_outputs(self, output, features, predictions, label):
+        z = tuple(self._detach_tree(v) for v in features)
+        p = tuple(v.detach() for v in predictions)
+        output["preds"]["fsr_joint"] = self._regularizer_fusion(z, p, freeze_weights=False)
+        batch_size = label.shape[0]
+        for i, name in enumerate(("c", "g", "f")):
+            index = torch.randperm(batch_size, device=p[i].device)
+            pert_z, pert_p = list(z), list(p)
+            pert_z[i] = self._index_tree(z[i], index, batch_size)
+            pert_p[i] = p[i].index_select(0, index)
+            output["preds"]["fsr_shuf" + name] = self._regularizer_fusion(
+                pert_z, pert_p, freeze_weights=False,
+            )
+            output["preds"]["fsr_" + name] = p[i]
+        output["preds"]["fsr_label"] = label.detach()
+
+    def forward(self, x, **kwargs):
+        if kwargs.pop("_mscr_fusion_only", False):
+            return self._fusion_forward(*x)
+        c, g, f, pc, pg, pf = self._get_features(x, **kwargs)
+        features, predictions = (c, g, f), (pc, pg, pf)
+        joint = self._fusion_forward(features, predictions)
+        output = {
+            "preds": {"combined": joint, "c": pc, "g": pg, "f": pf},
+            "features": {k: z["features"]["combined"]
+                         for k, z in zip(("c", "g", "f"), features)},
+        }
+        if not self.training:
+            return output
+        cfg = self.args.bias_infusion
+        use_mcr, use_fsr = cfg.get("l", 0) != 0, cfg.get("use_fsr", True)
+        if use_mcr or use_fsr:
+            label = kwargs.get("label")
+            if not torch.is_tensor(label) or label.ndim == 0 or label.shape[0] != joint.shape[0]:
+                raise ValueError("Training regularizers require label with matching batch dimension.")
+            if joint.shape[0] == 0:
+                raise ValueError("Empty training batches are not supported.")
+            if use_mcr:
+                self._add_mcr_outputs(output, features, predictions, label)
+            # Independent of l, so MSCR-only (l=0) works.
+            if use_fsr:
+                self._add_fsr_outputs(output, features, predictions, label)
+        return output
+
 
 class Base_3D_Model(nn.Module):
     def __init__(self, args, encs):

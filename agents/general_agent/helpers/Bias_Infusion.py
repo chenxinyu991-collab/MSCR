@@ -3336,245 +3336,141 @@ class Bias_Infusion_MCR_Reg(General_Bias_Infusion):
         return total, output_losses, False
 
 class Bias_Infusion_MCR_FSR_Reg(Bias_Infusion_MCR_Reg):
-    """
-    Regression version of MCR + FSR.
-
-    Compared with the classification version:
-    - Replace CE-based quantities with per-sample regression error
-    - Replace prediction JSD with per-sample MSE distance in prediction space
-
-    FSR still only updates fusion / decision layers on the model side.
-    """
-
-    def __init__(self, agent):
-        super(Bias_Infusion_MCR_FSR_Reg, self).__init__(agent)
+    """Three-modal regression MSCR, paired with MCR_FSR_3D_Model."""
 
     def _initialize_logs_n_utils(self):
-        super(Bias_Infusion_MCR_FSR_Reg, self)._initialize_logs_n_utils()
+        super()._initialize_logs_n_utils()
+        cfg = self.bias_infuser
+        self.task = cfg.get("task", "reg")
+        if self.task != "reg":
+            raise ValueError("This class implements regression, not classification.")
+        self.reg_by = cfg.get("reg_by", "dist_pred_cjsd")
+        allowed = {"dist_pred_cjsd", "dist_pred_max_cjsd", "dist_pred_all_max_cjsd"}
+        if self.l != 0 and self.reg_by not in allowed:
+            raise ValueError(f"Unsupported regression MCR reg_by: {self.reg_by}")
+        if self.contr_coeff or cfg.get("lib", 0):
+            raise ValueError("Set contr_coeff=0 and lib=0 for the specified task+MCR+MSCR objective.")
+        self.use_fsr = cfg.get("use_fsr", True)
+        self.fsr_use_gate = cfg.get("fsr_use_gate", True)
+        for name, default in (
+            ("fsr_lambda_dom", 0.02), ("fsr_lambda_syn", 0.05),
+            ("fsr_margin", 0.05), ("fsr_tau_dom", 10.0),
+            ("fsr_gate_kappa", 5.0), ("fsr_gate_tau", 1.2),
+        ):
+            value = float(cfg.get(name, default))
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative.")
+            setattr(self, name, value)
+        if self.fsr_tau_dom == 0:
+            raise ValueError("fsr_tau_dom must be positive.")
+        self.fsr_starting_epoch = cfg.get("fsr_starting_epoch", 3)
+        self.fsr_ending_epoch = cfg.get("fsr_ending_epoch", 20)
+        if self.fsr_starting_epoch > self.fsr_ending_epoch:
+            raise ValueError("Invalid MSCR activation interval.")
 
-        # --------------------------------------------------
-        # FSR hyper-parameters
-        # --------------------------------------------------
-        self.use_fsr = self.bias_infuser.get("use_fsr", True)
-
-        self.fsr_lambda_dom = self.bias_infuser.get("fsr_lambda_dom", 0.02)
-        self.fsr_lambda_syn = self.bias_infuser.get("fsr_lambda_syn", 0.05)
-
-        # margin for joint-vs-additive comparison (now on regression error)
-        self.fsr_margin = self.bias_infuser.get("fsr_margin", 0.05)
-
-        # smooth-max temperature in anti-dominance term
-        self.fsr_tau_dom = self.bias_infuser.get("fsr_tau_dom", 10.0)
-
-        # whether to use sample-adaptive gate
-        self.fsr_use_gate = self.bias_infuser.get("fsr_use_gate", True)
-
-        # gate sharpness
-        self.fsr_gate_kappa = self.bias_infuser.get("fsr_gate_kappa", 5.0)
-
-        # gate threshold on unimodal regression error
-        self.fsr_gate_tau = self.bias_infuser.get("fsr_gate_tau", 1.2)
-
-        # epoch scheduling
-        self.fsr_starting_epoch = self.bias_infuser.get("fsr_starting_epoch", 3)
-        self.fsr_ending_epoch = self.bias_infuser.get("fsr_ending_epoch", 20)
-
-    def _reshape_reg_target(self, pred, target):
-        """
-        Make target shape compatible with pred.
-        """
-        if target.shape != pred.shape:
-            target = target.view_as(pred)
-        return target
+    @staticmethod
+    def _reg_matrix(value):
+        if value.ndim not in (1, 2) or value.shape[0] == 0:
+            raise ValueError("Regression predictions must be nonempty [B], [B,1], or [B,D].")
+        # Evaluate MSE/smoothmax in FP32 under mixed precision; preserve FP64.
+        if not value.is_floating_point() or value.dtype in (torch.float16, torch.bfloat16):
+            value = value.float()
+        return value.unsqueeze(1) if value.ndim == 1 else value
 
     def _per_sample_reg_mse(self, pred_a, pred_b):
-        """
-        Per-sample MSE between two regression predictions.
-
-        Works for shape [B], [B,1], or [B,D].
-        Returns shape [B].
-        """
-        if pred_a.dim() == 1:
-            pred_a = pred_a.unsqueeze(1)
-        if pred_b.dim() == 1:
-            pred_b = pred_b.unsqueeze(1)
-
-        pred_b = self._reshape_reg_target(pred_a, pred_b)
-        return ((pred_a - pred_b) ** 2).mean(dim=1)
+        a, b = self._reg_matrix(pred_a), self._reg_matrix(pred_b)
+        if a.shape != b.shape:
+            raise ValueError(f"Regression shapes must match, got {tuple(a.shape)} and {tuple(b.shape)}.")
+        return (a - b).square().mean(dim=1)
 
     def get_fsr_losses(self, output):
-        """
-        Expected output["preds"] keys (regression version):
-            fsr_joint : [B] or [B,1] or [B,D]
-            fsr_shufa : same shape
-            fsr_shufv : same shape
-            fsr_c     : same shape
-            fsr_g     : same shape
-            fsr_label : same shape as target
-        """
         preds = output["preds"]
-
-        required_keys = ["fsr_joint", "fsr_shufa", "fsr_shufv", "fsr_c", "fsr_g", "fsr_label"]
-        for k in required_keys:
-            if k not in preds:
-                zero = torch.tensor(0.0).to(self.agent.device)
-                return {
-                    "fsr_dom": zero,
-                    "fsr_syn": zero,
-                    "fsr_s1": zero,
-                    "fsr_s2": zero,
-                    "fsr_l12": zero,
-                    "fsr_lref": zero,
-                    "fsr_gate": zero,
-                }
-
-        joint_pred = preds["fsr_joint"]
-        shufa_pred = preds["fsr_shufa"]
-        shufv_pred = preds["fsr_shufv"]
-        c_pred = preds["fsr_c"]
-        g_pred = preds["fsr_g"]
-        labels = preds["fsr_label"]
-
-        if joint_pred.dim() == 1:
-            joint_pred = joint_pred.unsqueeze(1)
-        if shufa_pred.dim() == 1:
-            shufa_pred = shufa_pred.unsqueeze(1)
-        if shufv_pred.dim() == 1:
-            shufv_pred = shufv_pred.unsqueeze(1)
-        if c_pred.dim() == 1:
-            c_pred = c_pred.unsqueeze(1)
-        if g_pred.dim() == 1:
-            g_pred = g_pred.unsqueeze(1)
-        if labels.dim() == 1:
-            labels = labels.unsqueeze(1)
-
-        labels = self._reshape_reg_target(joint_pred, labels)
-
-        # --------------------------------------------------
-        # 1) Anti-dominance term
-        # --------------------------------------------------
-        s1 = self._per_sample_reg_mse(joint_pred, shufa_pred)
-        s2 = self._per_sample_reg_mse(joint_pred, shufv_pred)
-
+        required = ("fsr_joint", "fsr_shufc", "fsr_shufg", "fsr_shuff",
+                    "fsr_c", "fsr_g", "fsr_f", "fsr_label")
+        missing = [key for key in required if key not in preds]
+        if missing:
+            raise KeyError(f"Missing three-modal MSCR outputs: {missing}. Use MCR_FSR_3D_Model.")
+        joint = self._reg_matrix(preds["fsr_joint"])
+        label = self._reg_matrix(preds["fsr_label"].detach())
+        unimodal = [self._reg_matrix(preds["fsr_" + k].detach()) for k in ("c", "g", "f")]
+        sensitivities = torch.stack([
+            self._per_sample_reg_mse(joint, preds["fsr_shuf" + k])
+            for k in ("c", "g", "f")
+        ], dim=0)
         tau = self.fsr_tau_dom
-        dom_raw = torch.logsumexp(torch.stack([tau * s1, tau * s2], dim=0), dim=0) / tau
-
-        # --------------------------------------------------
-        # 2) Additive non-synergistic reference
-        # --------------------------------------------------
-        ref_pred = 0.5 * (c_pred + g_pred)
-
-        l12 = self._per_sample_reg_mse(joint_pred, labels)
-        lref = self._per_sample_reg_mse(ref_pred, labels)
-
-        # --------------------------------------------------
-        # 3) Optional synergy gate
-        # --------------------------------------------------
-        if self.fsr_use_gate:
-            lc = self._per_sample_reg_mse(c_pred, labels)
-            lg = self._per_sample_reg_mse(g_pred, labels)
-
-            unimodal_best = torch.minimum(lc, lg)
-            gate = torch.sigmoid(self.fsr_gate_kappa * (unimodal_best - self.fsr_gate_tau))
-        else:
-            gate = torch.ones_like(l12)
-
-        # --------------------------------------------------
-        # 4) Explicit synergy gain term
-        # --------------------------------------------------
-        syn_raw = F.relu(self.fsr_margin + l12 - lref)
-
-        fsr_dom = (gate * dom_raw).mean()
-        fsr_syn = (gate * syn_raw).mean()
-
+        dom_raw = torch.logsumexp(tau * sensitivities, dim=0) / tau
+        # All three scalar/vector regression predictions participate equally.
+        ref = torch.stack(unimodal, dim=0).mean(dim=0)
+        ljoint = self._per_sample_reg_mse(joint, label)
+        lref = self._per_sample_reg_mse(ref, label)
+        best = torch.stack([self._per_sample_reg_mse(p, label) for p in unimodal], dim=0).amin(dim=0)
+        gate = (torch.sigmoid(self.fsr_gate_kappa * (best - self.fsr_gate_tau))
+                if self.fsr_use_gate else torch.ones_like(ljoint)).detach()
+        syn_raw = F.relu(self.fsr_margin + ljoint - lref)
         return {
-            "fsr_dom": fsr_dom,
-            "fsr_syn": fsr_syn,
-            "fsr_s1": s1.mean(),
-            "fsr_s2": s2.mean(),
-            "fsr_l12": l12.mean(),
-            "fsr_lref": lref.mean(),
+            "fsr_dom": (gate * dom_raw).mean(),
+            "fsr_syn": (gate * syn_raw).mean(),
+            "fsr_s1": sensitivities[0].mean().detach(),
+            "fsr_s2": sensitivities[1].mean().detach(),
+            "fsr_s3": sensitivities[2].mean().detach(),
+            "fsr_l123": ljoint.mean().detach(),
+            "fsr_lref": lref.mean().detach(),
             "fsr_gate": gate.mean(),
+            "fsr_best": best.mean().detach(),
         }
 
     def _fsr_is_active(self):
-        current_epoch = self.agent.logs["current_epoch"]
-        return self.use_fsr and (self.fsr_starting_epoch <= current_epoch <= self.fsr_ending_epoch)
+        epoch = self.agent.logs["current_epoch"]
+        return self.use_fsr and self.fsr_starting_epoch <= epoch <= self.fsr_ending_epoch
 
-    def before_backward(self, total, output_losses, w_loss, loss_fun, data, label, output, **kwargs):
-        """
-        First run the regression MCR logic, then add FSR losses.
-        """
-        total, output_losses, optstep_done = super(Bias_Infusion_MCR_FSR_Reg, self).before_backward(
-            total=total,
-            output_losses=output_losses,
-            w_loss=w_loss,
-            loss_fun=loss_fun,
-            data=data,
-            label=label,
-            output=output,
-            **kwargs,
-        )
-
-        if optstep_done:
-            return total, output_losses, optstep_done
-
-        if self._fsr_is_active():
-            fsr_losses = self.get_fsr_losses(output)
-
-            fsr_total = self.fsr_lambda_dom * fsr_losses["fsr_dom"] + self.fsr_lambda_syn * fsr_losses["fsr_syn"]
-            total = total + fsr_total
-
-            output_losses["fsr_dom"] = fsr_losses["fsr_dom"]
-            output_losses["fsr_syn"] = fsr_losses["fsr_syn"]
-            output_losses["fsr_total"] = fsr_total
-            output_losses["fsr_s1"] = fsr_losses["fsr_s1"]
-            output_losses["fsr_s2"] = fsr_losses["fsr_s2"]
-            output_losses["fsr_l12"] = fsr_losses["fsr_l12"]
-            output_losses["fsr_lref"] = fsr_losses["fsr_lref"]
-            output_losses["fsr_gate"] = fsr_losses["fsr_gate"]
-            output_losses["fsr_active"] = torch.tensor(1.0).to(self.agent.device)
-
-            try:
-                wandb.log(
-                    {
-                        "fsr": {
-                            "active": 1.0,
-                            "dom": fsr_losses["fsr_dom"].detach(),
-                            "syn": fsr_losses["fsr_syn"].detach(),
-                            "total": fsr_total.detach(),
-                            "s1": fsr_losses["fsr_s1"].detach(),
-                            "s2": fsr_losses["fsr_s2"].detach(),
-                            "l12": fsr_losses["fsr_l12"].detach(),
-                            "lref": fsr_losses["fsr_lref"].detach(),
-                            "gate": fsr_losses["fsr_gate"].detach(),
-                        }
-                    },
-                    step=self.agent.logs["current_step"] + 1,
-                )
-            except Exception:
-                pass
+    def _get_mcr_loss(self, output):
+        # Preserve the provided parent's perturbation distances and reference
+        # gradient convention. Only their fusion parameter path is frozen.
+        pert = super().get_perturbed_gradients(output)
+        positive = [
+            pert["enc0_p0_pred"] + pert["enc0_p01_pred"] + pert["enc0_p02_pred"],
+            pert["enc1_p1_pred"] + pert["enc1_p01_pred"] + pert["enc1_p12_pred"],
+            pert["enc2_p2_pred"] + pert["enc2_p12_pred"] + pert["enc2_p02_pred"],
+        ]
+        negative = [
+            pert["enc0_p1_pred"] + pert["enc0_p2_pred"] + pert["enc0_p12_pred"],
+            pert["enc1_p0_pred"] + pert["enc1_p2_pred"] + pert["enc1_p02_pred"],
+            pert["enc2_p1_pred"] + pert["enc2_p0_pred"] + pert["enc2_p01_pred"],
+        ]
+        if self.reg_by == "dist_pred_cjsd":
+            value = self.l * (-sum(positive) + sum(negative))
+        elif self.reg_by == "dist_pred_max_cjsd":
+            value = -self.l * sum(positive)
+        elif self.reg_by == "dist_pred_all_max_cjsd":
+            # Correct the supplied parent's copy/paste of all_p0 three times.
+            value = -self.l * sum(pert[f"all_p{k}_pred"] for k in ("0", "1", "2", "01", "12", "02"))
         else:
-            zero = torch.tensor(0.0).to(self.agent.device)
-            output_losses["fsr_dom"] = zero
-            output_losses["fsr_syn"] = zero
-            output_losses["fsr_total"] = zero
-            output_losses["fsr_s1"] = zero
-            output_losses["fsr_s2"] = zero
-            output_losses["fsr_l12"] = zero
-            output_losses["fsr_lref"] = zero
-            output_losses["fsr_gate"] = zero
-            output_losses["fsr_active"] = torch.tensor(0.0).to(self.agent.device)
+            raise ValueError(f"Unsupported reg_by: {self.reg_by}")
+        return value
 
-            try:
-                wandb.log(
-                    {"fsr": {"active": 0.0}},
-                    step=self.agent.logs["current_step"] + 1,
-                )
-            except Exception:
-                pass
-
-        return total, output_losses, optstep_done
+    def before_backward(self, total, output_losses, w_loss, loss_fun,
+                        data, label, output, **kwargs):
+        # Do NOT call the parent's before_backward: it would re-add MCR, and
+        # requests perturbation keys even for l=0. Keep its distance routine.
+        epoch = self.agent.logs["current_epoch"]
+        zero = total.detach().new_zeros(())
+        cfg = self.bias_infuser
+        mcr_active = (self.l != 0 and cfg.get("starting_epoch", 0) <= epoch <= cfg.get("ending_epoch", 1000))
+        mcr_loss = self._get_mcr_loss(output) if mcr_active else zero
+        total = total + mcr_loss
+        output_losses["reg_term"] = mcr_loss.detach()
+        if self._fsr_is_active():
+            losses = self.get_fsr_losses(output)
+            fsr_total = self.fsr_lambda_dom * losses["fsr_dom"] + self.fsr_lambda_syn * losses["fsr_syn"]
+            total = total + fsr_total
+            output_losses.update({k: v.detach() for k, v in losses.items()})
+            output_losses["fsr_total"] = fsr_total.detach()
+            output_losses["fsr_active"] = zero + 1
+        else:
+            for key in ("fsr_dom", "fsr_syn", "fsr_s1", "fsr_s2", "fsr_s3", "fsr_l123",
+                        "fsr_lref", "fsr_gate", "fsr_best", "fsr_total", "fsr_active"):
+                output_losses[key] = zero
+        return total, output_losses, False
 
 
 class Bias_Infusion_MCR3D_Reg(General_Bias_Infusion):
